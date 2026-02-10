@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pydantic
+motor
+pymongo
+google-genai

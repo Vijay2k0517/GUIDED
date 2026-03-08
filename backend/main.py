@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from typing import Annotated, Optional
 from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, HTTPException, Header, Query, status
+from fastapi import Depends, FastAPI, File, HTTPException, Header, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, ConfigDict, Field
@@ -245,6 +245,8 @@ class Candidate(CamelModel):
     skill_level: str = ""           # "beginner" | "intermediate" | "advanced"
     experience_level: str = ""      # "0" | "1-2" | "3-5" | "5+"
     resume_uploaded: bool = False
+    resume_filename: str = ""
+    resume_text: str = ""
     name: str = ""
     email: str = ""
     status: str = "registered"      # Current stage in the workflow
@@ -658,7 +660,7 @@ CANDIDATE PROFILE
 - Target Company: {target_company}
 - Current Skill Level: {skill_level}
 - Years of Experience: {experience_level}
-
+{resume_section}
 ==================================================
 ROADMAP GENERATION RULES (CRITICAL)
 ==================================================
@@ -750,12 +752,25 @@ async def generate_roadmap_with_gemini(candidate: Candidate) -> tuple[list[Roadm
         source_label is "gemini" on success, "mock" on fallback.
     """
     try:
+        # Build optional resume context for the prompt
+        resume_section = ""
+        if candidate.resume_text:
+            # Limit to first 2000 chars to stay within token limits
+            snippet = candidate.resume_text[:2000]
+            resume_section = (
+                "\n==================================================\n"
+                "CANDIDATE RESUME (extracted text)\n"
+                "==================================================\n"
+                f"{snippet}\n"
+            )
+
         prompt = _GEMINI_ROADMAP_PROMPT.format(
             career_goal=candidate.career_goal or "Career transition into tech",
             target_role=candidate.target_role or "Software Engineer",
             target_company=candidate.target_company or "Top Tech Companies",
             skill_level=candidate.skill_level or "intermediate",
             experience_level=candidate.experience_level or "1-2",
+            resume_section=resume_section,
         )
 
         from google.genai import types as genai_types
@@ -1417,6 +1432,105 @@ async def candidate_onboarding(payload: CandidateCreate, user: dict = Depends(re
         "candidateId": uid,
         "candidate": candidate.model_dump(by_alias=True),
     }
+
+
+# ─────────────────────────────────────────────────────────────
+#  Candidate Endpoints — Resume Upload & Parsing
+# ─────────────────────────────────────────────────────────────
+
+def _extract_pdf_text(file_bytes: bytes) -> str:
+    """Extract text from a PDF file using PyPDF2."""
+    import io
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(io.BytesIO(file_bytes))
+        pages = []
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                pages.append(text)
+        return "\n".join(pages).strip()
+    except Exception as exc:
+        log.warning("PDF text extraction failed: %s", exc)
+        return ""
+
+
+@app.post("/candidate/upload-resume")
+async def upload_resume(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_role("candidate")),
+):
+    """
+    Upload a resume file (PDF), extract its text, and store
+    the extracted content on the candidate's profile so it can
+    be fed into the Gemini roadmap generator.
+    """
+    uid = user.get("userId", "")
+
+    # Validate file type
+    allowed_types = [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    ]
+    if file.content_type not in allowed_types:
+        raise HTTPException(400, "Only PDF, DOC, or DOCX files are accepted")
+
+    # Validate file size (10 MB max)
+    contents = await file.read()
+    max_size = 10 * 1024 * 1024
+    if len(contents) > max_size:
+        raise HTTPException(400, "File size exceeds 10 MB limit")
+
+    # Extract text from PDF
+    resume_text = ""
+    if file.content_type == "application/pdf":
+        resume_text = _extract_pdf_text(contents)
+
+    # Ensure candidate exists
+    doc = await db.candidates.find_one({"_id": uid})
+    if not doc:
+        # Create a minimal candidate record so resume is stored
+        await db.candidates.insert_one({
+            "_id": uid,
+            "name": user.get("name", ""),
+            "email": user.get("email", ""),
+            "status": "registered",
+            "resume_uploaded": True,
+            "resume_filename": file.filename or "resume.pdf",
+            "resume_text": resume_text,
+            "career_goal": "", "target_role": "", "target_company": "",
+            "skill_level": "", "experience_level": "",
+            "roadmap_generated": False,
+            "roadmap": [], "skill_gaps": [], "sessions": [],
+            "action_items": [], "mentor_id": None,
+        })
+    else:
+        await db.candidates.update_one({"_id": uid}, {"$set": {
+            "resume_uploaded": True,
+            "resume_filename": file.filename or "resume.pdf",
+            "resume_text": resume_text,
+        }})
+
+    return {
+        "message": "Resume uploaded successfully",
+        "filename": file.filename,
+        "size": len(contents),
+        "textExtracted": len(resume_text) > 0,
+        "textPreview": resume_text[:500] if resume_text else "",
+    }
+
+
+@app.delete("/candidate/remove-resume")
+async def remove_resume(user: dict = Depends(require_role("candidate"))):
+    """Remove the uploaded resume from the candidate's profile."""
+    uid = user.get("userId", "")
+    await db.candidates.update_one({"_id": uid}, {"$set": {
+        "resume_uploaded": False,
+        "resume_filename": "",
+        "resume_text": "",
+    }})
+    return {"message": "Resume removed"}
 
 
 # ─────────────────────────────────────────────────────────────

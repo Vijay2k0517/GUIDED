@@ -19,10 +19,10 @@
  */
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { postOnboarding } from "@/lib/api";
+import { postOnboarding, uploadResume, removeResume } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { RouteGuard } from "@/components/route-guard";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -85,6 +85,13 @@ export default function OnboardingPage() {
     resumeUploaded:  false,
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  /* ── Resume file state ── */
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [resumePreview, setResumePreview] = useState<string | null>(null);
 
   const totalSteps = steps.length;
   const progress   = (currentStep / totalSteps) * 100;
@@ -398,29 +405,115 @@ export default function OnboardingPage() {
                   Optional, but helps us provide more targeted recommendations.
                 </p>
               </div>
+
+              {/* Hidden file input */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.doc,.docx"
+                className="hidden"
+                onChange={async (e) => {
+                  const selected = e.target.files?.[0];
+                  if (!selected) return;
+
+                  // Validate file size (10 MB)
+                  if (selected.size > 10 * 1024 * 1024) {
+                    setUploadError("File size exceeds 10 MB limit");
+                    return;
+                  }
+
+                  setUploadError(null);
+                  setIsUploading(true);
+
+                  const result = await uploadResume(selected);
+
+                  if (result) {
+                    setResumeFile(selected);
+                    setFormData({ ...formData, resumeUploaded: true });
+                    setResumePreview(result.textPreview || null);
+                  } else {
+                    setUploadError("Upload failed. Please try again.");
+                  }
+                  setIsUploading(false);
+                }}
+              />
+
               <div
                 className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 text-center transition-colors ${
                   formData.resumeUploaded
                     ? "border-primary/30 bg-primary/5"
                     : "hover:border-primary/20"
                 }`}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={async (e) => {
+                  e.preventDefault();
+                  const dropped = e.dataTransfer.files?.[0];
+                  if (!dropped) return;
+
+                  const allowed = [
+                    "application/pdf",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/msword",
+                  ];
+                  if (!allowed.includes(dropped.type)) {
+                    setUploadError("Only PDF, DOC, or DOCX files are accepted");
+                    return;
+                  }
+                  if (dropped.size > 10 * 1024 * 1024) {
+                    setUploadError("File size exceeds 10 MB limit");
+                    return;
+                  }
+
+                  setUploadError(null);
+                  setIsUploading(true);
+
+                  const result = await uploadResume(dropped);
+
+                  if (result) {
+                    setResumeFile(dropped);
+                    setFormData({ ...formData, resumeUploaded: true });
+                    setResumePreview(result.textPreview || null);
+                  } else {
+                    setUploadError("Upload failed. Please try again.");
+                  }
+                  setIsUploading(false);
+                }}
               >
-                {formData.resumeUploaded ? (
+                {isUploading ? (
+                  <>
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                      <Upload className="h-6 w-6 text-primary animate-pulse" />
+                    </div>
+                    <p className="mt-4 font-medium">Uploading...</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Extracting resume content
+                    </p>
+                  </>
+                ) : formData.resumeUploaded && resumeFile ? (
                   <>
                     <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
                       <Check className="h-6 w-6 text-primary" />
                     </div>
-                    <p className="mt-4 font-medium">resume_2026.pdf</p>
+                    <p className="mt-4 font-medium">{resumeFile.name}</p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      File uploaded successfully
+                      {(resumeFile.size / 1024).toFixed(1)} KB — uploaded successfully
                     </p>
+                    {resumePreview && (
+                      <p className="mt-2 max-w-md text-xs text-muted-foreground line-clamp-3">
+                        {resumePreview}
+                      </p>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"
                       className="mt-3"
-                      onClick={() =>
-                        setFormData({ ...formData, resumeUploaded: false })
-                      }
+                      onClick={async () => {
+                        await removeResume();
+                        setResumeFile(null);
+                        setResumePreview(null);
+                        setFormData({ ...formData, resumeUploaded: false });
+                        if (fileInputRef.current) fileInputRef.current.value = "";
+                      }}
                     >
                       Remove
                     </Button>
@@ -440,15 +533,16 @@ export default function OnboardingPage() {
                       variant="outline"
                       size="sm"
                       className="mt-4"
-                      onClick={() =>
-                        setFormData({ ...formData, resumeUploaded: true })
-                      }
+                      onClick={() => fileInputRef.current?.click()}
                     >
                       Browse Files
                     </Button>
                   </>
                 )}
               </div>
+              {uploadError && (
+                <p className="text-sm text-destructive text-center">{uploadError}</p>
+              )}
             </div>
           )}
 

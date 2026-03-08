@@ -112,6 +112,67 @@ export async function postOnboarding(
   });
 }
 
+/* ── Resume Upload ── */
+
+/** Response from the resume upload endpoint. */
+export interface ResumeUploadResponse {
+  message: string;
+  filename: string;
+  size: number;
+  textExtracted: boolean;
+  textPreview: string;
+}
+
+/**
+ * Upload a resume file to the backend.
+ * POST /candidate/upload-resume (multipart/form-data)
+ */
+export async function uploadResume(
+  file: File
+): Promise<ResumeUploadResponse | null> {
+  try {
+    const token = getToken();
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+
+    const res = await fetch(`${API_BASE}/candidate/upload-resume`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: formData,
+    });
+
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      console.error("Resume upload failed:", body?.detail || res.status);
+      return null;
+    }
+
+    return (await res.json()) as ResumeUploadResponse;
+  } catch (err) {
+    console.error("Resume upload error:", err);
+    return null;
+  }
+}
+
+/**
+ * Remove the uploaded resume.
+ * DELETE /candidate/remove-resume
+ */
+export async function removeResume(): Promise<boolean> {
+  const result = await apiFetch<{ message: string }>("/candidate/remove-resume", {
+    method: "DELETE",
+  });
+  return result !== null;
+}
+
 /* ── Roadmap Generation ── */
 
 /**
